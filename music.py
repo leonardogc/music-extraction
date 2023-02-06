@@ -3,97 +3,116 @@ import os
 import numpy as np
 import math
 
-def get_frame(cap, time_stamp):
-    cap.set(cv2.CAP_PROP_POS_MSEC, time_stamp)
-    success, image = cap.read()
 
-    return success, image
+def save_frame(frame_1, frame_2, curr_time, temp_path, music_sheet_coords, debug):
+    frame_1 = frame_1[music_sheet_coords[1]:music_sheet_coords[3], music_sheet_coords[0]:music_sheet_coords[2]]
+    frame_2 = frame_2[music_sheet_coords[1]:music_sheet_coords[3], music_sheet_coords[0]:music_sheet_coords[2]]
+
+    final_frame = np.zeros_like(frame_1)
+
+    x = int(final_frame.shape[1] / 2)
+
+    final_frame[:, :x] = frame_2[:, :x]
+    final_frame[:, x:] = frame_1[:, x:]
+    
+    save_path = os.path.join(temp_path, f'{int(curr_time)}.png')
+    cv2.imwrite(save_path, final_frame)
+
+    print(f'Saving {save_path}')
+
+    if debug:
+        cv2.imshow('frame_1_cropped', frame_1)
+        cv2.imshow('frame_2_cropped', frame_2)
+        cv2.imshow('final_frame', final_frame)
+
+        cv2.waitKey(0)
+
+def skip_ms(cap, time_step):
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    start_time = (cap.get(cv2.CAP_PROP_POS_FRAMES) * 1000) / fps
+
+    while True:
+        success = cap.grab()
+
+        curr_time = (cap.get(cv2.CAP_PROP_POS_FRAMES) * 1000) / fps
+
+        if not success or curr_time - start_time >= time_step:
+            break
+    
+    if not success:
+        return success, None, start_time + time_step
+
+    success, image = cap.retrieve()
+    
+    return success, image, curr_time
 
 
 def extract_frames(video_path, 
                     temp_path='temp', 
                     video_start=0,
-                    video_end=np.inf, 
-                    bpm=60,
-                    bpb=4,
-                    bar_number_thres=0.97,
-                    diff_thres=20,
+                    video_end=np.inf,
+                    time_step=1000,
+                    bar_number_pixel_threshold=20,
+                    bar_number_thres=75,
                     bar_number_coords=(70, 0, 70 + 80, 80),
-                    music_sheet_coords=(0, 0, 1920, 350)):
+                    music_sheet_coords=(0, 0, 1920, 350),
+                    debug=False):
 
     os.makedirs(temp_path, exist_ok=True)
 
+    curr_time = video_start
+
     # init capture
     cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, curr_time)
+    success, frame = cap.read()
 
-    curr_stamp = video_start
-
-    bar_length_ms = (bpb * 60000) / bpm
-
-    last_bar_number = None
+    bar_number_1 = cv2.cvtColor(frame[bar_number_coords[1]:bar_number_coords[3], bar_number_coords[0]:bar_number_coords[2]], cv2.COLOR_BGR2GRAY)
+    frame_1 = frame
+    frame_2 = frame
 
     while True:
-        success, frame = get_frame(cap, curr_stamp)
 
-        if not success or curr_stamp > video_end:
+        if not success or curr_time > video_end:
+            save_frame(frame_1, frame_2, curr_time, temp_path, music_sheet_coords, debug)
             break
 
-        bar_number = frame[bar_number_coords[1]:bar_number_coords[3], bar_number_coords[0]:bar_number_coords[2]]
+        bar_number = cv2.cvtColor(frame[bar_number_coords[1]:bar_number_coords[3], bar_number_coords[0]:bar_number_coords[2]], cv2.COLOR_BGR2GRAY)
 
-        if last_bar_number is None:
-            last_bar_number = (np.random.rand(*(bar_number.shape))*255).astype(bar_number.dtype)
+        bar_number_diff = np.absolute(bar_number_1.astype(int) - bar_number.astype(int)).astype(np.uint8)
+        bar_number_pixel_change = np.sum(bar_number_diff > bar_number_pixel_threshold)
 
-        bar_number_diff = cv2.matchTemplate(last_bar_number, bar_number, cv2.TM_CCOEFF_NORMED)[0, 0]
+        if debug:
+            print(curr_time)
+            print(bar_number_pixel_change)
+
+            cv2.imshow('frame', frame)
+            cv2.imshow('frame_cropped', frame[music_sheet_coords[1]:music_sheet_coords[3], music_sheet_coords[0]:music_sheet_coords[2]])
+
+            cv2.imshow('bar_number', bar_number)
+            cv2.imshow('bar_number_1', bar_number_1)
+
+            cv2.imshow('bar_number_diff', bar_number_diff)
+
+            cv2.waitKey(0)
         
-        if bar_number_diff < bar_number_thres:
-            frame1 = frame[music_sheet_coords[1]:music_sheet_coords[3], music_sheet_coords[0]:music_sheet_coords[2]]
-            success, frame2 = get_frame(cap, curr_stamp + 2 * bar_length_ms)
+        if bar_number_pixel_change > bar_number_thres:
+            save_frame(frame_1, frame_2, curr_time, temp_path, music_sheet_coords, debug)
 
-            if not success:
-                final_frame = frame1
-            else:
-                frame2 = frame2[music_sheet_coords[1]:music_sheet_coords[3], music_sheet_coords[0]:music_sheet_coords[2]]
-
-                frame_diff = np.absolute(frame2.astype(int) - frame1.astype(int)).astype(np.uint8)
-                frame_diff = cv2.cvtColor(frame_diff, cv2.COLOR_BGR2GRAY)
-
-                y, x = np.mean(np.argwhere(frame_diff > diff_thres), axis=0).astype(int)
-
-                final_frame = np.zeros_like(frame1)
-                final_frame[:, :x] = frame2[:, :x]
-                final_frame[:, x:] = frame1[:, x:]
-
-                '''cv2.imshow('frame1', frame1)
-                cv2.imshow('frame2', frame2)
-                cv2.imshow('frame_diff', frame_diff)
-                cv2.imshow('final_frame', final_frame)'''
-            
-            save_path = os.path.join(temp_path, f'{int(curr_stamp)}.png')
-            cv2.imwrite(save_path, final_frame)
-
-            print(f'Saving {save_path}')
-
-            last_bar_number = bar_number
-
-        '''cv2.imshow('frame', frame)
-        cv2.imshow('bar_number', bar_number)
-
-        print(curr_stamp)
-
-        # Set waitKey
-        k = cv2.waitKey(0) & 0xFF
-        if k == 27:
-            break'''
-
-        print(curr_stamp)
-
-        curr_stamp += bar_length_ms
+            bar_number_1 = bar_number
+            frame_1 = frame
+            frame_2 = frame
+        else:
+            frame_2 = frame
+        
+        success, frame, curr_time = skip_ms(cap, time_step)
 
     cap.release()
     cv2.destroyAllWindows()
-    
 
-def generate_music_sheet(out_path='out', frames_path='temp', buffer=0):
+
+def generate_music_sheet(out_path='out', frames_path='temp', buffer=0, debug=False):
     os.makedirs(out_path, exist_ok=True)
 
     frames = os.listdir(frames_path)
@@ -129,30 +148,32 @@ def generate_music_sheet(out_path='out', frames_path='temp', buffer=0):
             frm = cv2.imread(os.path.join(frames_path, frames[idx]))
             frm = cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY)
 
-            y = skip + j * (frame_shape[0] + buffer + skip)
+            y = skip + j * (skip + frame_shape[0] + buffer)
 
             sheet[y:y+frame_shape[0]] = frm
         
-        sheet[sheet == 249] = 255
+        sheet[sheet == frm[1, 1]] = 255
 
-        '''cv2.imshow('sheet', sheet)
-
-        # Set waitKey
-        k = cv2.waitKey(0) & 0xFF
-        if k == 27:
-            break'''
+        if debug:
+            cv2.imshow('sheet', sheet)
+            cv2.waitKey(0)
 
         cv2.imwrite(os.path.join(out_path, f'{i + 1}.png'), sheet)
 
 
+if __name__ == '__main__':
+    '''extract_frames('y2mate.com - How to play piano part of All Of Me by John Legend_1080pFHR.mp4',
+                    temp_path='temp',
+                    video_start=5.6*1000)'''
 
-extract_frames('y2mate.com - How to play piano part of All Of Me by John Legend_1080pFHR.mp4',
-                temp_path='temp2',
-                video_start=3*60*1000,
-                bpm=126,
-                bpb=4)
+    
+    extract_frames('y2mate.com - Céline Dion  My Heart Will Go On Titanic  Piano Tutorial  SHEETS_1080pFHR.mp4',
+                    temp_path='temp',
+                    time_step=1650,
+                    video_start=6.1*1000,
+                    video_end=(4*60+30)*1000,
+                    bar_number_coords=(135, 0, 135 + 80, 80),
+                    music_sheet_coords=(0, 0, 1920, 370))
 
-# generate_music_sheet()
-
-
+    generate_music_sheet()
 
